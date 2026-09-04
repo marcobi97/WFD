@@ -43,6 +43,13 @@ main{max-width:760px;margin:10px auto 0;padding:0 12px calc(94px + env(safe-area
 rt{font-size:.55em;color:#777d76;font-weight:400}
 .note{border-top:1px dashed var(--line);margin-top:12px;padding-top:10px;color:#71766f;font-size:13px;line-height:1.55}
 .note:empty{display:none}
+.sentence-audio{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:12px}
+.sentence-audio button,.sentence-audio select{font:inherit;font-size:14px;min-height:44px;border:1px solid var(--line);border-radius:10px;padding:7px 12px;background:var(--card);color:var(--ink)}
+.sentence-audio .play-sentence{background:var(--accent);color:white;border-color:var(--accent)}
+.sentence-audio button:disabled{opacity:.45}
+.sentence-audio label{font-size:13px;color:var(--muted)}
+.audio-status{flex-basis:100%;font-size:12px;color:var(--muted);line-height:1.5}
+.sentence-card.is-speaking{border-color:var(--accent)}
 .hide-phonetics rt{display:none}
 .empty{display:none;text-align:center;color:var(--muted);padding:60px 20px}
 .empty.show{display:block}
@@ -1340,6 +1347,88 @@ html:not(.js-ready) .nav-btn[aria-disabled="true"]{opacity:.38;pointer-events:no
 
   let currentPart = Math.max(0, Math.min(parts.length - 1, Number(readSetting('wfd-mobile-part', 0)) || 0));
   let fontSize = Math.max(16, Math.min(24, Number(readSetting('wfd-mobile-font', 18)) || 18));
+  const synth = window.speechSynthesis;
+  const speechAvailable = !!synth && typeof window.SpeechSynthesisUtterance === 'function';
+  let speechRate = Number(readSetting('wfd-reading-rate', 1));
+  if (![0.8, 1, 1.2].includes(speechRate)) speechRate = 1;
+  let activeSpeech = null;
+  let speechToken = 0;
+  let startTimer = null;
+
+  function stopSpeech(message = '已停止') {
+    speechToken++;
+    clearTimeout(startTimer);
+    if (activeSpeech) {
+      activeSpeech.card.classList.remove('is-speaking');
+      activeSpeech.card.querySelector('.play-sentence').textContent = '▶ 播放整句';
+      activeSpeech.card.querySelector('.stop-sentence').disabled = true;
+      activeSpeech.card.querySelector('.audio-status').textContent = message;
+    }
+    activeSpeech = null;
+    if (speechAvailable) synth.cancel();
+  }
+
+  function playSentence(card) {
+    if (!speechAvailable) return;
+    // Remove annotations from a clone, preserving the displayed MD and case.
+    const english = card.querySelector('.en').cloneNode(true);
+    english.querySelectorAll('rt, rp').forEach(node => node.remove());
+    const text = english.textContent.replace(/\s+/g, ' ').trim();
+    if (!text) return;
+    stopSpeech();
+    const token = speechToken;
+    const utterance = new SpeechSynthesisUtterance(text);
+    const voices = synth.getVoices(); // Refresh within the user's click, including on iOS.
+    const voice = voices.find(v => v.name === 'Google UK English Female')
+      || voices.find(v => /^en[-_]GB$/i.test(v.lang));
+    utterance.lang = 'en-GB';
+    if (voice) utterance.voice = voice;
+    utterance.rate = speechRate;
+    const status = card.querySelector('.audio-status');
+    activeSpeech = {card, utterance}; // Keep the utterance alive until completion.
+    card.classList.add('is-speaking');
+    card.querySelector('.play-sentence').textContent = '↻ 重新播放';
+    card.querySelector('.stop-sentence').disabled = false;
+    status.textContent = '正在准备朗读…';
+    utterance.onstart = () => {
+      if (token !== speechToken) return;
+      clearTimeout(startTimer);
+      status.textContent = `正在朗读 · ${speechRate}× · ${voice ? voice.name : '系统英语语音'}`;
+    };
+    utterance.onend = () => {
+      if (token === speechToken) stopSpeech('播放完成');
+    };
+    utterance.onerror = event => {
+      if (token !== speechToken) return;
+      stopSpeech(`未能播放（${event.error || '语音错误'}），请检查音量、英语语音设置后再次点击播放。`);
+    };
+    startTimer = setTimeout(() => {
+      if (token === speechToken) stopSpeech('语音未启动。请检查音量，在 Safari 或 Chrome 网页中重新点击播放；不要使用文件预览。');
+    }, 10000);
+    // Speak synchronously in the click handler; do not lose iOS user activation.
+    try {
+      if (synth.paused) synth.resume();
+      synth.speak(utterance);
+    } catch (_) {
+      if (token === speechToken) stopSpeech('无法启动语音，请重新打开网页后点击播放。');
+    }
+  }
+
+  content.addEventListener('click', event => {
+    const button = event.target.closest('.play-sentence, .stop-sentence');
+    if (!button) return;
+    if (button.classList.contains('stop-sentence')) stopSpeech();
+    else playSentence(button.closest('.sentence-card'));
+  });
+  content.addEventListener('change', event => {
+    if (!event.target.matches('.speech-rate')) return;
+    speechRate = Number(event.target.value);
+    saveSetting('wfd-reading-rate', speechRate);
+    stopSpeech('语速已更新，请点击播放');
+    content.querySelectorAll('.speech-rate').forEach(select => { select.value = String(speechRate); });
+  });
+  window.addEventListener('pagehide', () => stopSpeech());
+  document.addEventListener('visibilitychange', () => { if (document.hidden) stopSpeech(); });
 
   parts.forEach((_, index) => {
     const button = partsNav.children[index];
@@ -1355,6 +1444,12 @@ html:not(.js-ready) .nav-btn[aria-disabled="true"]{opacity:.38;pointer-events:no
       <div class="card-label"><span class="number">${item.number}</span><span>P${item.part}</span></div>
       ${item.zh ? `<div class="zh">${item.zh}</div>` : ''}
       <div class="en" lang="en-GB">${item.en}</div>
+      <div class="sentence-audio">
+        <button type="button" class="play-sentence" ${speechAvailable ? '' : 'disabled'} aria-label="播放 P${item.part} 第${item.number}句">▶ 播放整句</button>
+        <button type="button" class="stop-sentence" disabled>■ 停止</button>
+        <label>语速 <select class="speech-rate" ${speechAvailable ? '' : 'disabled'}>${[0.8, 1, 1.2].map(rate => `<option value="${rate}" ${rate === speechRate ? 'selected' : ''}>${rate}×</option>`).join('')}</select></label>
+        <div class="audio-status" role="status" aria-live="polite">${speechAvailable ? '英式文字朗读 · 点击播放' : '当前环境不支持语音，请在 Safari 或 Chrome 网页中打开'}</div>
+      </div>
       <div class="note">${item.note}</div>
     </article>`;
   }
@@ -1382,6 +1477,7 @@ html:not(.js-ready) .nav-btn[aria-disabled="true"]{opacity:.38;pointer-events:no
   }
 
   function showPart(index, scroll = true) {
+    stopSpeech();
     currentPart = Math.max(0, Math.min(parts.length - 1, index));
     search.value = '';
     document.body.classList.remove('searching');
@@ -1393,6 +1489,7 @@ html:not(.js-ready) .nav-btn[aria-disabled="true"]{opacity:.38;pointer-events:no
   }
 
   function runSearch() {
+    stopSpeech();
     const query = search.value.trim().toLowerCase();
     if (!query) return showPart(currentPart, false);
     const matches = parts.flat().filter(item => stripHTML(item.en + ' ' + item.zh).includes(query));
